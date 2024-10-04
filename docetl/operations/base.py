@@ -12,6 +12,7 @@ from rich.status import Status
 class BaseOperation(ABC):
     def __init__(
         self,
+        runner,
         config: Dict,
         default_model: str,
         max_threads: int,
@@ -31,6 +32,7 @@ class BaseOperation(ABC):
         """
         assert "name" in config, "Operation must have a name"
         assert "type" in config, "Operation must have a type"
+        self.runner = runner
         self.config = config
         self.default_model = default_model
         self.max_threads = max_threads
