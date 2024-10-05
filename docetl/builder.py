@@ -138,11 +138,9 @@ class Optimizer(Pipeline):
 
         The method also calls print_optimizer_config() to display the initial configuration.
         """ 
-        Pipeline.__init__(self, config)
-        self.console = Console()
+        Pipeline.__init__(self, config, max_threads)
         self.optimized_config = copy.deepcopy(self.config)
         self.llm_client = LLMClient(model)
-        self.max_threads = max_threads or (os.cpu_count() or 1) * 4
         self.operations_cost = 0
         self.timeout = timeout
         self.selectivities = defaultdict(dict)
@@ -166,7 +164,6 @@ class Optimizer(Pipeline):
         if self.config.get("optimizer_config", {}).get("sample_sizes", {}):
             self.sample_size_map.update(self.config["optimizer_config"]["sample_sizes"])
 
-        self.status = None
         self.step_op_to_optimized_ops = {}
 
         self.print_optimizer_config()
