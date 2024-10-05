@@ -11,10 +11,10 @@ from rich.console import Console
 from docetl.dataset import Dataset, create_parsing_tool_map
 from docetl.operations import get_operation
 from docetl.operations.utils import flush_cache
-from docetl.utils import load_config
 import pyrate_limiter
 import math
 from inspect import isawaitable
+from .pipeline import Pipeline
 
 load_dotenv()
 
@@ -41,7 +41,7 @@ class BucketCollection(pyrate_limiter.BucketFactory):
         return self.buckets[item.name]
 
 
-class DSLRunner:
+class DSLRunner(Pipeline):
     """
     A class for executing Domain-Specific Language (DSL) configurations.
 
@@ -64,7 +64,7 @@ class DSLRunner:
         Args:
             max_threads (int, optional): Maximum number of threads to use. Defaults to None.
         """
-        self.config = config
+        Pipeline.__init__(self, config)
         self.default_model = self.config.get("default_model", "gpt-4o-mini")
         self.max_threads = max_threads or (os.cpu_count() or 1) * 4
         self.console = Console()
