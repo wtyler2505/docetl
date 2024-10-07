@@ -20,7 +20,7 @@ from docetl.optimizers.join_optimizer import JoinOptimizer
 from docetl.optimizers.map_optimizer import MapOptimizer
 from docetl.optimizers.reduce_optimizer import ReduceOptimizer
 from docetl.optimizers.utils import LLMClient
-from .pipeline import Pipeline
+from docetl.config_wrapper import ConfigWrapper
 
 install(show_locals=True)
 
@@ -77,7 +77,7 @@ class DatasetOnDisk(dict):
         return [(key, self[key]) for key in self.keys()]
 
 
-class Optimizer(Pipeline):
+class Optimizer(ConfigWrapper):
     @classmethod
     def from_yaml(cls, yaml_file: str, **kwargs):
         # check that file ends with .yaml or .yml
@@ -89,10 +89,8 @@ class Optimizer(Pipeline):
         base_name = yaml_file.rsplit(".", 1)[0]
         suffix = yaml_file.split("/")[-1].split(".")[0]
         return super(Optimizer, cls).from_yaml(
-            yaml_file,
-            base_name=base_name,
-            yaml_file_suffix=suffix,
-            **kwargs)
+            yaml_file, base_name=base_name, yaml_file_suffix=suffix, **kwargs
+        )
 
     def __init__(
         self,
@@ -137,8 +135,8 @@ class Optimizer(Pipeline):
             datasets (Dict): Stores loaded datasets.
 
         The method also calls print_optimizer_config() to display the initial configuration.
-        """ 
-        Pipeline.__init__(self, config, max_threads)
+        """
+        ConfigWrapper.__init__(self, config, max_threads)
         self.optimized_config = copy.deepcopy(self.config)
         self.llm_client = LLMClient(model)
         self.operations_cost = 0
@@ -193,7 +191,7 @@ class Optimizer(Pipeline):
             try:
                 operation_class = get_operation(operation_type)
                 operation_class(
-                    self,
+                    self.api,
                     operation_config,
                     self.config.get("default_model", "gpt-4o-mini"),
                     self.max_threads,
@@ -1117,7 +1115,7 @@ class Optimizer(Pipeline):
             List[Dict[str, Any]]: The optimized operation configuration.
         """
         reduce_optimizer = ReduceOptimizer(
-            self, 
+            self,
             self.config,
             self.console,
             self.llm_client,
@@ -1160,7 +1158,7 @@ class Optimizer(Pipeline):
         new_right_name = right_name
         for _ in range(max_iterations):
             join_optimizer = JoinOptimizer(
-                self, 
+                self,
                 self.config,
                 op_config,
                 self.console,
@@ -1282,7 +1280,7 @@ class Optimizer(Pipeline):
             List[Dict[str, Any]]: The optimized operation configuration.
         """
         map_optimizer = MapOptimizer(
-            self, 
+            self,
             self.config,
             self.console,
             self.llm_client,
@@ -1312,7 +1310,7 @@ class Optimizer(Pipeline):
             List[Dict[str, Any]]: The optimized operation configuration.
         """
         optimized_config, cost = JoinOptimizer(
-            self, 
+            self,
             self.config,
             op_config,
             self.console,
@@ -1360,7 +1358,7 @@ class Optimizer(Pipeline):
         operation_class = get_operation(op_config["type"])
 
         oc_kwargs = {
-            "runner": self,
+            "api_wrapper": self.api,
             "config": op_config,
             "default_model": self.config["default_model"],
             "max_threads": self.max_threads,

@@ -763,9 +763,7 @@ Remember: The scratchpad should contain information necessary for processing fut
         cost = 0.0
 
         # Parse the response
-        parsed_response = self.parse_llm_response(
-            response, output_schema, messages=messages
-        )
+        parsed_response = self.parse_llm_response(response, output_schema)
         output = parsed_response[0]
 
         messages = (
