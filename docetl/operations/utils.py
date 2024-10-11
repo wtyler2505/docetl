@@ -21,6 +21,7 @@ from rich.console import Console
 from rich.prompt import Prompt
 from tqdm import tqdm
 
+from docetl.console import DOCETL_CONSOLE
 from docetl.utils import completion_cost, count_tokens
 import time
 
@@ -73,7 +74,7 @@ def freezeargs(func):
     return wrapped
 
 
-def flush_cache(console: Console = Console()):
+def flush_cache(console: Console = DOCETL_CONSOLE):
     """
     Flush the cache to disk.
     """
@@ -82,7 +83,7 @@ def flush_cache(console: Console = Console()):
     console.log("[bold green]Cache flushed to disk.[/bold green]")
 
 
-def clear_cache(console: Console = Console()):
+def clear_cache(console: Console = DOCETL_CONSOLE):
     """
     Clear the LLM cache stored on disk.
 
@@ -522,7 +523,7 @@ class APIWrapper(object):
         output_schema: Dict[str, str],
         tools: Optional[List[Dict[str, str]]] = None,
         scratchpad: Optional[str] = None,
-        console: Console = Console(),
+        console: Console = DOCETL_CONSOLE,
         timeout_seconds: int = 120,
         max_retries_per_timeout: int = 2,
     ) -> Any:
@@ -721,7 +722,7 @@ Remember: The scratchpad should contain information necessary for processing fut
         output_schema: Dict[str, str],
         validator_prompt_template: str,
         num_gleaning_rounds: int,
-        console: Console = Console(),
+        console: Console = DOCETL_CONSOLE,
         timeout_seconds: int = 120,
         max_retries_per_timeout: int = 2,
         verbose: bool = False,
