@@ -38,9 +38,9 @@ cache.close()
 
 
 class LLMResult(BaseModel):
-    response: Any
+    outputs: List[Any]
     total_cost: float
-    validated: bool
+    validated: List[bool]
 
 
 def freezeargs(func):
@@ -421,7 +421,7 @@ class APIWrapper(object):
 
     def _cached_call_llm(
         self,
-        cache_key: str,
+        cache_keys: List[str],
         model: str,
         op_type: str,
         messages: List[Dict[str, str]],
@@ -432,6 +432,7 @@ class APIWrapper(object):
         gleaning_config: Optional[Dict[str, Any]] = None,
         verbose: bool = False,
         bypass_cache: bool = False,
+        batch_size: int = 1,
     ) -> LLMResult:
         """
         Cached version of the call_llm function.
@@ -456,14 +457,22 @@ class APIWrapper(object):
             LLMResult: The response from _call_llm_with_cache.
         """
         total_cost = 0.0
-        validated = False
+        validated = []
+        all_outputs = []
         with cache as c:
-            response = c.get(cache_key)
-            if response is not None and not bypass_cache:
-                validated = True
+            outputs = [c.get(cache_key) for cache_key in cache_keys]
+            if all([output is not None for output in outputs]) and not bypass_cache:
+                validated = [True] * len(outputs)
+                all_outputs = outputs
             else:
                 response = self._call_llm_with_cache(
-                    model, op_type, messages, output_schema, tools, scratchpad
+                    model,
+                    op_type,
+                    messages,
+                    output_schema,
+                    tools,
+                    scratchpad,
+                    batch_size,
                 )
                 total_cost += completion_cost(response)
 
@@ -473,84 +482,114 @@ class APIWrapper(object):
                     validator_prompt_template = Template(gleaning_config["prompt"])
 
                     parsed_output = self.parse_llm_response(
-                        response, output_schema, tools
+                        response, output_schema, tools, batch_size=batch_size
                     )[0]
 
-                    validator_messages = (
-                        [
+                    # If batch_size > 1, validate each one
+                    if batch_size == 1:
+                        parsed_output = [parsed_output]
+
+                    for i, ind_output in enumerate(parsed_output):
+                        validator_messages = [
                             {
                                 "role": "system",
-                                "content": f"You are a helpful assistant, intelligently processing data. This is a {op_type} operation.",
+                                "content": (
+                                    f"You are a helpful assistant, intelligently processing data. This is a {op_type} operation."
+                                ),
                             }
-                        ]
-                        + messages
-                        + [
-                            {"role": "assistant", "content": json.dumps(parsed_output)},
-                        ]
-                    )
+                        ] + messages
 
-                    for rnd in range(num_gleaning_rounds):
-                        # Prepare validator prompt
-                        validator_prompt = validator_prompt_template.render(
-                            output=parsed_output
-                        )
-                        self.runner.rate_limiter.try_acquire("llm_call", weight=1)
+                        for rnd in range(num_gleaning_rounds):
+                            # Prepare validator prompt
+                            validator_messages += [
+                                {
+                                    "role": "assistant",
+                                    "content": json.dumps(ind_output),
+                                },
+                            ]
+                            validator_prompt = validator_prompt_template.render(
+                                output=ind_output
+                            )
+                            validator_messages += [
+                                {"role": "user", "content": validator_prompt}
+                            ]
+                            self.runner.rate_limiter.try_acquire("llm_call", weight=1)
 
-                        validator_response = completion(
-                            model=gleaning_config.get("model", model),
-                            messages=truncate_messages(
-                                validator_messages
-                                + [{"role": "user", "content": validator_prompt}],
-                                model,
-                            ),
-                            response_format={
-                                "type": "json_schema",
-                                "json_schema": {
-                                    "name": "response",
-                                    "strict": True,
-                                    "schema": {
-                                        "type": "object",
-                                        "properties": {
-                                            "should_refine": {"type": "boolean"},
-                                            "improvements": {"type": "string"},
+                            validator_response = completion(
+                                model=gleaning_config.get("model", model),
+                                messages=truncate_messages(
+                                    validator_messages,
+                                    model,
+                                ),
+                                response_format={
+                                    "type": "json_schema",
+                                    "json_schema": {
+                                        "name": "response",
+                                        "strict": True,
+                                        "schema": {
+                                            "type": "object",
+                                            "properties": {
+                                                "should_refine": {"type": "boolean"},
+                                                "improvements": {"type": "string"},
+                                            },
+                                            "required": [
+                                                "should_refine",
+                                                "improvements",
+                                            ],
+                                            "additionalProperties": False,
                                         },
-                                        "required": ["should_refine", "improvements"],
-                                        "additionalProperties": False,
                                     },
                                 },
-                            },
-                        )
-                        total_cost += completion_cost(validator_response)
+                            )
+                            total_cost += completion_cost(validator_response)
 
-                        # Parse the validator response
-                        suggestion = json.loads(
-                            validator_response.choices[0].message.content
-                        )
-                        if not suggestion["should_refine"]:
-                            break
+                            # Parse the validator response
+                            suggestion = json.loads(
+                                validator_response.choices[0].message.content
+                            )
+                            if not suggestion["should_refine"]:
+                                break
 
-                        if verbose:
-                            self.runner.console.log(
-                                f"Validator improvements (gleaning round {rnd + 1}): {suggestion['improvements']}"
+                            if verbose:
+                                self.runner.console.log(
+                                    f"Validator improvements (gleaning round {rnd + 1}): {suggestion['improvements']}"
+                                )
+
+                            # Prompt for improvement
+                            improvement_prompt = f"""Based on the validation feedback:
+
+                            ```
+                            {suggestion['improvements']}
+                            ```
+
+                            Please improve your previous response. Ensure that the output adheres to the required schema and addresses any issues raised in the validation."""
+                            messages.append(
+                                {"role": "user", "content": improvement_prompt}
                             )
 
-                        # Prompt for improvement
-                        improvement_prompt = f"""Based on the validation feedback:
+                            # Call LLM again
+                            response = self._call_llm_with_cache(
+                                model,
+                                op_type,
+                                messages,
+                                output_schema,
+                                tools,
+                                scratchpad,
+                            )
+                            total_cost += completion_cost(response)
 
-                        ```
-                        {suggestion['improvements']}
-                        ```
+                            ind_output = self.parse_llm_response(
+                                response, output_schema, tools, batch_size=1
+                            )[0]
+                            messages += [
+                                {
+                                    "role": "assistant",
+                                    "content": json.dumps(ind_output),
+                                },
+                            ]
 
-                        Please improve your previous response. Ensure that the output adheres to the required schema and addresses any issues raised in the validation."""
-                        messages.append({"role": "user", "content": improvement_prompt})
-
-                        # Call LLM again
-                        response = self._call_llm_with_cache(
-                            model, op_type, messages, output_schema, tools, scratchpad
-                        )
-                        total_cost += completion_cost(response)
-
-                    validated = True
+                        all_outputs.append(ind_output)
+                        validated.append(True)
 
                 # If there's validation, handle it here
                 elif validation_config:
@@ -558,53 +597,81 @@ class APIWrapper(object):
                     validation_fn = validation_config.get("validation_fn")
                     val_rule = validation_config.get("val_rule")
 
-                    # Try validation
-                    i = 0
-                    validation_result = False
-                    while not validation_result and i < num_tries:
-                        parsed_output, validation_result = validation_fn(response)
-                        if validation_result:
-                            validated = True
-                            break
+                    # Parse the output first
+                    parsed_outputs = self.parse_llm_response(
+                        response, output_schema, tools, batch_size=batch_size
+                    )[0]
+                    if batch_size == 1:
+                        parsed_outputs = [parsed_outputs]
 
-                        # Append the validation result to messages
-                        messages.append(
-                            {
-                                "role": "assistant",
-                                "content": json.dumps(parsed_output),
-                            }
-                        )
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": f"Your output {parsed_output} failed my validation rule: {str(val_rule)}\n\nPlease try again.",
-                            }
-                        )
-                        self.runner.console.log(
-                            f"[bold red]Validation failed:[/bold red] {val_rule}\n"
-                            f"\t[yellow]Output:[/yellow] {parsed_output}\n"
-                            f"\t({i + 1}/{num_tries})"
-                        )
-                        i += 1
+                    # Try validation for each item in batch
+                    for batch_item in range(batch_size):
+                        i = 0
+                        validation_result = False
+                        validated = False
+                        parsed_output = parsed_outputs[batch_item]
+                        while not validation_result and i < num_tries:
+                            # Then pass it into validation_fn
+                            validation_result = validation_fn(parsed_output)
 
-                        response = self._call_llm_with_cache(
-                            model, op_type, messages, output_schema, tools, scratchpad
-                        )
-                        total_cost += completion_cost(response)
+                            if validation_result:
+                                all_outputs.append(parsed_output)
+                                validated.append(True)
+                                break
+
+                            # Append the validation result to messages
+                            messages.append(
+                                {
+                                    "role": "assistant",
+                                    "content": json.dumps(parsed_output),
+                                }
+                            )
+                            messages.append(
+                                {
+                                    "role": "user",
+                                    "content": f"Your output {parsed_output} failed my validation rule: {str(val_rule)}\n\nPlease try again.",
+                                }
+                            )
+                            self.runner.console.log(
+                                f"[bold red]Validation failed for item {batch_item + 1}:[/bold red] {val_rule}\n"
+                                f"\t[yellow]Output:[/yellow] {parsed_output}\n"
+                                f"\t({i + 1}/{num_tries})"
+                            )
+                            i += 1
+
+                            response = self._call_llm_with_cache(
+                                model,
+                                op_type,
+                                messages,
+                                output_schema,
+                                tools,
+                                scratchpad,
+                                batch_size=1,
+                            )
+                            total_cost += completion_cost(response)
+
+                            parsed_output = self.parse_llm_response(
+                                response, output_schema, tools, batch_size=1
+                            )[0]
+
+                        if not validated:
+                            all_outputs.append(None)
+                            validated.append(False)
 
                 else:
                     # No validation, so we assume the result is valid
-                    validated = True
+                    validated = [True] * batch_size
 
                 # Only set the cache if the result tool calls or output is not empty
-                if (
-                    response
-                    and "tool_calls" in dir(response.choices[0].message)
-                    and response.choices[0].message.tool_calls
+                for cache_key, output, is_valid in zip(
+                    cache_keys, all_outputs, validated
                 ):
-                    c.set(cache_key, response)
+                    if is_valid:
+                        c.set(cache_key, output)
 
-        return LLMResult(response=response, total_cost=total_cost, validated=validated)
+        return LLMResult(
+            outputs=all_outputs, total_cost=total_cost, validated=validated
+        )
 
     def call_llm(
         self,
@@ -620,6 +687,7 @@ class APIWrapper(object):
         gleaning_config: Optional[Dict[str, Any]] = None,
         verbose: bool = False,
         bypass_cache: bool = False,
+        batch_size: int = 1,
     ) -> LLMResult:
         """
         Wrapper function that uses caching for LLM calls.
@@ -662,6 +730,7 @@ class APIWrapper(object):
                     gleaning_config=gleaning_config,
                     verbose=verbose,
                     bypass_cache=bypass_cache,
+                    batch_size=batch_size,
                 )
             except RateLimitError:
                 # TODO: this is a really hacky way to handle rate limits
@@ -691,6 +760,7 @@ class APIWrapper(object):
         output_schema: Dict[str, str],
         tools: Optional[str] = None,
         scratchpad: Optional[str] = None,
+        batch_size: int = 1,
     ) -> Any:
         """
         Make an LLM call with caching.
@@ -708,7 +778,12 @@ class APIWrapper(object):
         Returns:
             str: The response from the LLM.
         """
-        props = {key: convert_val(value) for key, value in output_schema.items()}
+
+        props = (
+            {key: convert_val(value, model) for key, value in output_schema.items()}
+            if batch_size == 1
+            else {"type": "array", "items": output_schema}
+        )
         use_tools = True
 
         if (
@@ -760,6 +835,9 @@ class APIWrapper(object):
             tool_choice = None
 
         system_prompt = f"You are a helpful assistant, intelligently processing data. This is a {op_type} operation. You will perform the specified task on the provided data. The result should be a structured output that you will send back to the user."
+        if batch_size > 1:
+            system_prompt += f"\nYou will be running the operation on a batch of items, and return your answer as a list of one output per input in the batch."
+
         if scratchpad:
             system_prompt += f"""
 
@@ -818,13 +896,14 @@ Remember: The scratchpad should contain information necessary for processing fut
         schema: Dict[str, Any] = {},
         tools: Optional[List[Dict[str, str]]] = None,
         manually_fix_errors: bool = False,
+        batch_size: int = 1,
     ) -> List[Dict[str, Any]]:
         """
         Parse the response from a language model.
         This function extracts the tool calls from the LLM response and returns the arguments
         """
         try:
-            return self._parse_llm_response_helper(response, schema, tools)
+            return self._parse_llm_response_helper(response, schema, tools, batch_size)
         except InvalidOutputError as e:
             if manually_fix_errors:
                 rprint(
@@ -846,6 +925,7 @@ Remember: The scratchpad should contain information necessary for processing fut
         response: Any,
         schema: Dict[str, Any] = {},
         tools: Optional[List[Dict[str, str]]] = None,
+        batch_size: int = 1,
     ) -> List[Dict[str, Any]]:
         """
         Parse the response from a language model.
@@ -857,6 +937,7 @@ Remember: The scratchpad should contain information necessary for processing fut
             response (Any): The response object from the language model.
             schema (Optional[Dict[str, Any]]): The schema that was passed to the LLM.
             tools (Optional[List[Dict[str, str]]]): The tools that were passed to the LLM.
+            batch_size (int): The batch size.
 
         Returns:
             List[Dict[str, Any]]: A list of dictionaries containing the parsed output.
